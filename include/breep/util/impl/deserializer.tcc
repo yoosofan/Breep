@@ -1,6 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 //                                                                                               //
-// Copyright 2017 Lucas Lazare.                                                                  //
+// Copyright 2017-2018 Lucas Lazare.                                                             //
 // This file is part of Breep project which is released under the                                //
 // European Union Public License v1.1. If a copy of the EUPL was                                 //
 // not distributed with this software, you can obtain one at :                                   //
@@ -29,7 +29,7 @@ namespace breep {
 namespace detail {
 	// The code from the following method was adapted from the public domain
 	template <typename FloatType, typename InputType, unsigned int ExponentBits, unsigned int MantissaBits>
-	FloatType fromIEEE(InputType value) {
+	constexpr FloatType fromIEEE(InputType value) {
 
 		static_assert(std::numeric_limits<uint_fast8_t>::max() >= std::numeric_limits<InputType>::digits
 				, "[unlikely]: will not able to store std::numeric_limits<InputType>::digitd in uint_fast8_t");
@@ -96,15 +96,15 @@ namespace detail {
 	}
 }
 
-	void read_size(deserializer& d, uint64_t& size) {
-		uint8_t uint8(0);
-		uint_fast8_t oct_to_read(0);
-		d >> oct_to_read;
-		while (oct_to_read--) {
-			d >> uint8;
-			size |= (static_cast<uint64_t>(uint8) << static_cast<uint64_t>(oct_to_read * 8));
-		}
+inline void read_size(deserializer& d, uint64_t& size) {
+	uint8_t uint8(0);
+	uint_fast8_t oct_to_read(0);
+	d >> oct_to_read;
+	while (oct_to_read--) {
+		d >> uint8;
+		size |= (static_cast<uint64_t>(uint8) << static_cast<uint64_t>(oct_to_read * 8));
 	}
+}
 
 namespace detail { // namespace breep::detail
 	
@@ -121,9 +121,18 @@ namespace detail { // namespace breep::detail
 	deserializer& right_shift_op_impl(deserializer&, float&);
 	deserializer& right_shift_op_impl(deserializer&, double&);
 
+	template <typename T>
+	std::enable_if_t<breep::type_traits<T>::is_enum_class, deserializer&>
+	right_shift_op_impl(deserializer&, T&);
+
+	template <typename T>
+	std::enable_if_t<breep::type_traits<T>::is_enum_plain, deserializer&>
+    right_shift_op_impl(deserializer&, T&);
+
 	// generic method deserializing containerd that support .push_back(value_type)
 	template <typename PushableContainer>
-	deserializer& right_shift_op_impl(deserializer&, PushableContainer&);
+	std::enable_if_t<!breep::type_traits<PushableContainer>::is_enum, deserializer&>
+	right_shift_op_impl(deserializer&, PushableContainer&);
 
 	// STL containers
 	template <typename T>
@@ -251,14 +260,14 @@ namespace detail { // namespace breep::detail
 		return d;
 	}
 
-	inline deserializer& operator>>(deserializer& d, bool& val) {
+	inline deserializer& right_shift_op_impl(deserializer& d, bool& val) {
 		uint8_t c;
 		right_shift_op_impl(d, c);
 		val = (c == static_cast<uint8_t>('1'));
 		return d;
 	}
 
-	inline deserializer& operator>>(deserializer& d, char& val) {
+	inline deserializer& right_shift_op_impl(deserializer& d, char& val) {
 		if (std::numeric_limits<char>::min() < 0) {
 			unsigned char unsigned_value(0);
 			right_shift_op_impl(d, unsigned_value);
@@ -285,8 +294,27 @@ namespace detail { // namespace breep::detail
 		return d;
 	}
 
+	template <typename T>
+	std::enable_if_t<breep::type_traits<T>::is_enum_class, deserializer&>
+	right_shift_op_impl(deserializer& d, T& val) {
+		std::underlying_type_t<T> value;
+		d >> value;
+		val = static_cast<T>(value);
+		return d;
+	}
+
+	template <typename T>
+	std::enable_if_t<breep::type_traits<T>::is_enum_plain, deserializer&>
+	right_shift_op_impl(deserializer& d, T& val) {
+		int64_t value;
+		d >> value;
+		val = static_cast<T>(value);
+		return d;
+	}
+
 	template<typename PushableContainer>
-	deserializer& right_shift_op_impl(deserializer& d, PushableContainer& val) {
+	std::enable_if_t<!breep::type_traits<PushableContainer>::is_enum, deserializer&>
+	right_shift_op_impl(deserializer& d, PushableContainer& val) {
 		uint64_t size = 0;
 		read_size(d, size);
 		while (size--) {
@@ -320,7 +348,7 @@ namespace detail { // namespace breep::detail
 		return d;
 	}
 
-    deserializer& right_shift_op_impl(deserializer& d, std::vector<bool>& vector) {
+    inline deserializer& right_shift_op_impl(deserializer& d, std::vector<bool>& vector) {
         uint8_t mask;
         uint64_t size = 0;
         read_size(d, size);

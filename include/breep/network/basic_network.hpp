@@ -3,7 +3,7 @@
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 //                                                                                               //
-// Copyright 2017 Lucas Lazare.                                                                  //
+// Copyright 2017-2018 Lucas Lazare.                                                             //
 // This file is part of Breep project which is released under the                                //
 // European Union Public License v1.1. If a copy of the EUPL was                                 //
 // not distributed with this software, you can obtain one at :                                   //
@@ -634,6 +634,36 @@ namespace breep {
 			m_manager.join();
 		}
 
+		/**
+		 * @brief Sets the predicate called on incomming connections
+		 *
+		 * @details the predicate is called with the new peer candidate as parameter. If it returns true,
+		 *          the peer is accepted and marked as connected. Otherwise it is disconnected.
+		 *
+		 * @param pred should be noexcept
+		 *
+		 * @note You should not attempt to communicate with the peer before it is marked as connected (ie: when
+		 *       the connection handler is called)
+		 *
+		 * @since 1.0.0
+		 *
+		 * @sa basic_network::remove_connection_predicate()
+		 */
+		void set_connection_predicate(std::function<bool(const peer&)> pred) {
+			m_manager.set_connection_predicate(pred);
+		}
+
+		/**
+		 * @brief removes previously set connection predicate and goes back to default: accepting any connection
+		 *
+		 * @since 1.0.0
+		 *
+		 * @sa basic_network::set_connection_predicate(std::function<bool(const peer&)> pred)
+		 */
+		void remove_connection_predicate() {
+			m_manager.remove_connection_predicate();
+		}
+
 	private:
 
 		void network_data_listener(const peer& source, cuint8_random_iterator data, size_t data_size, bool sent_to_all) {
@@ -659,7 +689,7 @@ namespace breep {
 			auto associated_listener = m_data_listeners.find(hash_code);
 			if (associated_listener != m_data_listeners.end()) {
 				if (!std::get<detail::network_cst::caller>(associated_listener->second)(*this, source, d, sent_to_all) && m_unlistened_listener) {
-					breep::logger<network>.trace("calling default listener.");
+					breep::logger<network>.warning("Calling default listener.");
 					m_unlistened_listener(*this, source, d, sent_to_all, hash_code);
 				}
 				m_object_builder_mutex.unlock();
@@ -669,10 +699,13 @@ namespace breep {
 
 				try {
 					m_unlistened_listener(*this, source, d, sent_to_all, hash_code);
+
 				} catch (const std::exception& e) {
-					std::cerr << e.what();
+					breep::logger<network>.warning("Exception thrown while calling default data listener");
+					breep::logger<network>.warning(e.what());
 				} catch (const std::exception* e) {
-					std::cerr << e->what();
+					breep::logger<network>.warning("Exception thrown while calling default data listener");
+					breep::logger<network>.warning(e->what());
 					delete e;
 				}
 

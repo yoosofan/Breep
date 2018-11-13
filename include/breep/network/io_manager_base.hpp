@@ -4,7 +4,7 @@
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 //                                                                                               //
-// Copyright 2017 Lucas Lazare.                                                                  //
+// Copyright 2017-2018 Lucas Lazare.                                                             //
 // This file is part of Breep project which is released under the                                //
 // European Union Public License v1.1. If a copy of the EUPL was                                 //
 // not distributed with this software, you can obtain one at :                                   //
@@ -98,7 +98,7 @@ namespace breep {
 		/**
 		 * @brief connects to a peer
 		 *
-		 * @return the newly connected peer or peer::bad_peer if the connection wasn't successful.
+		 * @return the newly connected peer or an empty optional if the connection wasn't successful.
 		 *
 		 * @since 0.1.0
 		 */
@@ -112,11 +112,23 @@ namespace breep {
 		virtual void process_connected_peer(basic_peer<io_manager>& peer) = 0;
 
 		/**
+		 * @brief performs any required action when a peer connection was denied.
+		 *
+		 * @since 1.0.0
+		 */
+		 virtual void process_connection_denial(basic_peer<io_manager>& peer) = 0;
+
+		/**
 		 * @brief disconnects from the network
 		 *
 		 * @since 0.1.0
 		 */
 		virtual void disconnect() = 0;
+
+		/**
+		 * @brief disconnects a peer
+		 */
+		virtual void disconnect(basic_peer<io_manager>& peer) = 0;
 
 		/**
 		 * @brief Network's main thread entry point

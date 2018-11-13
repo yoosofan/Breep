@@ -3,7 +3,7 @@
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 //                                                                                               //
-// Copyright 2017 Lucas Lazare.                                                                  //
+// Copyright 2017-2018 Lucas Lazare.                                                             //
 // This file is part of Breep project which is released under the                                //
 // European Union Public License v1.1. If a copy of the EUPL was                                 //
 // not distributed with this software, you can obtain one at :                                   //
@@ -90,6 +90,19 @@ namespace breep {
 #endif
 
 	namespace detail {
+
+		template <typename, typename S>
+		using second_type = S;
+
+		template <typename T>
+		auto enum_class_test(int) -> second_type<decltype(+T{}), std::false_type>;
+
+		template <typename T>
+		auto enum_class_test(...) -> std::true_type;
+
+		template <unsigned int N>
+		constexpr uint64_t hash(const char str[N]);
+
 		uint64_t hash(const std::string& str);
 
 		template <typename>
@@ -151,6 +164,9 @@ namespace breep {
 	template <typename T>
 	struct type_traits {
 		static constexpr bool is_any_ptr =  std::is_pointer<std::remove_cv_t<std::remove_reference_t<T>>>::value;
+		static constexpr bool is_enum = std::is_enum<T>::value;
+		static constexpr bool is_enum_class = is_enum && decltype(detail::enum_class_test<T>(0))::value;
+		static constexpr bool is_enum_plain = is_enum && !is_enum_class;
 
 		/**
 		 * holds the name of the template class (unmangled), including namespace and template parameters.
@@ -182,7 +198,19 @@ namespace breep {
 
 		// sdbm's hash algorithm, gawk's implementation.
 		// when modified, basic_io_manager::IO_PROTOCOL_ID_1 should be updated aswell
-		uint64_t hash(const std::string& str) {
+		template <size_t N>
+		constexpr uint64_t hash(const char str[N]) {
+			uint64_t hash_code = 0;
+
+			for (std::string::size_type i = N ; i-- ;) {
+				if (str[i] != '>' && str[i] != ' ' && (str[i] != ':' || str[i+1] != ':')) {
+					hash_code = str[i] + (hash_code << 6u) + (hash_code << 16u) - hash_code;
+				}
+			}
+			return hash_code;
+		}
+
+		inline uint64_t hash(const std::string& str) {
 			uint64_t hash_code = 0;
 
 			for (std::string::size_type i = str.size() ; i-- ;) {
@@ -211,7 +239,7 @@ namespace breep {
 		struct identifier_from_tuple<std::tuple<>> {
 			static const std::string value;
 		};
-		const std::string identifier_from_tuple<std::tuple<>>::value{};
+		inline const std::string identifier_from_tuple<std::tuple<>>::value{};
 
 		template<typename... T>
 		struct identifier_from_tuple<std::tuple<T...>> {

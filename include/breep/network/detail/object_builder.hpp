@@ -3,7 +3,7 @@
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 //                                                                                               //
-// Copyright 2017 Lucas Lazare.                                                                  //
+// Copyright 2017-2018 Lucas Lazare.                                                             //
 // This file is part of Breep project which is released under the                                //
 // European Union Public License v1.1. If a copy of the EUPL was                                 //
 // not distributed with this software, you can obtain one at :                                   //
@@ -70,19 +70,22 @@ namespace breep { namespace detail {
 				return false;
 			} else {
 				breep::logger<object_builder<io_manager,T>>.debug("Building object of type " + type_traits<T>::universal_name());
-				T object;
 				try {
+					T object;
 					data >> object;
+					fire(breep::basic_netdata_wrapper<io_manager, T>(lnetwork, received_from, object, is_private));
+
 				} catch (const std::exception& e) {
-					std::cerr << e.what();
-                    return false;
+					breep::logger<object_builder<io_manager,T>>.warning("Exception thrown while deserializing object of type " + type_traits<T>::universal_name());
+					breep::logger<object_builder<io_manager,T>>.warning(e.what());
+					return false;
 				} catch (const std::exception* e) {
-					std::cerr << e->what();
+					breep::logger<object_builder<io_manager,T>>.warning("Exception thrown while deserializing object of type " + type_traits<T>::universal_name());
+					breep::logger<object_builder<io_manager,T>>.warning(e->what());
 					delete e;
-                    return false;
+					return false;
 				}
 
-				fire(breep::basic_netdata_wrapper<io_manager, T>(lnetwork, received_from, object, is_private));
 
 				return true;
 			}
@@ -138,10 +141,15 @@ namespace breep { namespace detail {
 				wrapper.listener_id = listeners_pair.first;
 				try {
 					listeners_pair.second(wrapper);
+
 				} catch (const std::exception& e) {
-					std::cerr << e.what();
+					breep::logger<object_builder<io_manager, T>>.warning("Exception thrown while calling listener "
+										+ std::to_string(wrapper.listener_id) + " for type " + type_traits<T>::universal_name());
+					breep::logger<object_builder<io_manager, T>>.warning(e.what());
 				} catch (const std::exception* e) {
-					std::cerr << e->what();
+					breep::logger<object_builder<io_manager, T>>.warning("Exception thrown while calling listener "
+										+ std::to_string(wrapper.listener_id) + " for type " + type_traits<T>::universal_name());
+					breep::logger<object_builder<io_manager, T>>.warning(e->what());
 					delete e;
 				}
 			}

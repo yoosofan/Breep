@@ -1,14 +1,12 @@
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 //                                                                                               //
-// Copyright 2017 Lucas Lazare.                                                                  //
+// Copyright 2017-2018 Lucas Lazare.                                                             //
 // This file is part of Breep project which is released under the                                //
 // European Union Public License v1.1. If a copy of the EUPL was                                 //
 // not distributed with this software, you can obtain one at :                                   //
 // https://joinup.ec.europa.eu/community/eupl/og_page/european-union-public-licence-eupl-v11     //
 //                                                                                               //
 ///////////////////////////////////////////////////////////////////////////////////////////////////
-
-#include "breep/network/basic_peer_manager.hpp" // allows my IDE to work
 
 #include <thread>
 #include <iostream>
@@ -32,12 +30,14 @@ breep::basic_peer_manager<T>::basic_peer_manager(T&& manager, unsigned short por
 	, m_co_listener{}
 	, m_data_r_listener{}
 	, m_dc_listener{}
+	, m_predicate{[](const auto&){return true;}}
 	, m_me{}
 	, m_failed_connections{}
 	, m_manager{std::move(manager)}
 	, m_id_count{0}
 	, m_port{port}
 	, m_running(false)
+    , m_waitfor_run{}
 	, m_co_mutex{}
 	, m_dc_mutex{}
 	, m_data_mutex{}
@@ -46,6 +46,8 @@ breep::basic_peer_manager<T>::basic_peer_manager(T&& manager, unsigned short por
 {
 	static_assert(std::is_base_of<breep::io_manager_base<T>, T>::value, "Specified type not derived from breep::io_manager_base");
 	static_cast<io_manager_base<T>*>(&m_manager)->owner(this);
+
+    m_waitfor_run.lock();
 
 	m_command_handlers[static_cast<uint8_t>(commands::send_to)]                = &breep::basic_peer_manager<T>::send_to_handler;
 	m_command_handlers[static_cast<uint8_t>(commands::send_to_all)]            = &breep::basic_peer_manager<T>::send_to_all_handler;
@@ -60,6 +62,9 @@ breep::basic_peer_manager<T>::basic_peer_manager(T&& manager, unsigned short por
 	m_command_handlers[static_cast<uint8_t>(commands::peers_list)]             = &breep::basic_peer_manager<T>::peers_list_handler;
 	m_command_handlers[static_cast<uint8_t>(commands::peer_disconnection)]     = &breep::basic_peer_manager<T>::peer_disconnection_handler;
 	m_command_handlers[static_cast<uint8_t>(commands::keep_alive)]             = &breep::basic_peer_manager<T>::keep_alive_handler;
+	m_command_handlers[static_cast<uint8_t>(commands::connection_accepted)]    = &breep::basic_peer_manager<T>::empty_handler;
+	m_command_handlers[static_cast<uint8_t>(commands::connection_refused)]     = &breep::basic_peer_manager<T>::empty_handler;
+
 }
 
 template <typename T>
@@ -112,6 +117,7 @@ inline void breep::basic_peer_manager<T>::run() {
 		m_thread->join();
 	}
 	m_thread = std::make_unique<std::thread>(&peer_manager::sync_run, this);
+    m_waitfor_run.lock();
 }
 
 template <typename T>
@@ -119,6 +125,7 @@ inline void breep::basic_peer_manager<T>::sync_run() {
 	require_non_running();
 	breep::logger<peer_manager>.info("Starting the network.");
 	m_running = true;
+    m_waitfor_run.unlock();
 	m_manager.run();
 	m_running = false;
 }
@@ -146,11 +153,36 @@ template <typename T>
 void breep::basic_peer_manager<T>::disconnect() {
 
 	breep::logger<peer_manager>.info("Shutting the network off.");
+
 	m_manager.disconnect();
+	for (auto&& peer_pair : m_peers) {
+		peer& p = peer_pair.second;
+		m_manager.disconnect(p);
+
+		p.distance(std::numeric_limits<unsigned char>::max());
+		breep::logger<peer_manager>.info("Peer " + p.id_as_string() + " disconnected");
+
+		std::lock_guard<std::mutex> lock_guard(m_dc_mutex);
+		for(auto& l : m_dc_listener) {
+			try {
+				breep::logger<peer_manager>.trace("Calling disconnection listener (id: " + std::to_string(l.first) + ")");
+				l.second(*this, p);
+
+			} catch (const std::exception& e) {
+				breep::logger<peer_manager>.warning("Exception thrown while calling disconnection listener " + l.first);
+				breep::logger<peer_manager>.warning(e.what());
+			} catch (const std::exception* e) {
+				breep::logger<peer_manager>.warning("Exception thrown while calling disconnection listener " + l.first);
+				breep::logger<peer_manager>.warning(e->what());
+				delete e;
+			}
+		}
+	}
 
 	m_peers.clear();
 	m_me.path_to_passing_by().clear();
 	m_me.bridging_from_to().clear();
+	m_failed_connections.clear();
 }
 
 template <typename T>
@@ -212,57 +244,76 @@ bool breep::basic_peer_manager<T>::try_connect(const boost::asio::ip::address& a
 		breep::logger<peer_manager>.info
 				("Successfully connected to " + new_peer->id_as_string() + "@" + address.to_string() + ":" + std::to_string(port_));
 		boost::uuids::uuid uuid = new_peer->id();
+		m_ignore_predicate = true;
 		peer_connected(std::move(new_peer.get()));
+		m_ignore_predicate = false;
 
 		m_manager.send(commands::retrieve_peers, constant::unused_param, m_peers.at(uuid));
 		return true;
+
 	} else {
 		breep::logger<peer_manager>.warning
 				("Connection to [" + address.to_string() + "]:" + std::to_string(port_) + " failed");
+		m_manager.disconnect();
 		return false;
 	}
 }
 
 template <typename T>
 inline void breep::basic_peer_manager<T>::peer_connected(peer&& p) {
-	boost::uuids::uuid id = p.id();
-	m_peers.emplace(std::make_pair(id, std::move(p)));
+	if (m_peers.count(p.id())) {
+		breep::logger<peer_manager>.warning("Peer with id " + p.id_as_string()
+				+ " tried to connect, but a peer with equal id is already connected.");
+		m_manager.process_connection_denial(p);
+		return;
+	}
 
-	std::pair<boost::uuids::uuid, const peer*> pair_wptr = std::make_pair(id, &(m_peers.at(id)));
-	m_me.path_to_passing_by().insert(pair_wptr);
+	if (m_ignore_predicate || m_predicate(p)) {
 
-	m_me.bridging_from_to().insert(std::make_pair(id, std::vector<const peer*>{}));
+		boost::uuids::uuid id = p.id();
+		m_peers.emplace(std::make_pair(id, std::move(p)));
+
+		std::pair<boost::uuids::uuid, const peer*> pair_wptr = std::make_pair(id, &(m_peers.at(id)));
+		m_me.path_to_passing_by().insert(pair_wptr);
+
+		m_me.bridging_from_to().insert(std::make_pair(id, std::vector<const peer*>{}));
 
 
-	peer& new_peer = m_peers.at(id);
-	new_peer.distance(0);
-	m_manager.process_connected_peer(new_peer);
+		peer& new_peer = m_peers.at(id);
+		new_peer.distance(0);
+		m_manager.process_connected_peer(new_peer);
 
-	breep::logger<peer_manager>.info("Peer " + boost::uuids::to_string(id) + " connected");
+		breep::logger<peer_manager>.info("Peer " + boost::uuids::to_string(id) + " connected");
 
-	std::lock_guard<std::mutex> lock_guard(m_co_mutex);
-	for(auto& l : m_co_listener) {
-		try {
-			breep::logger<peer_manager>.trace("Calling connection listener (id: " + std::to_string(l.first) + ")");
-			l.second(*this, p);
-		} catch (const std::exception& e) {
-			std::cerr << e.what() << std::endl;
-		} catch (const std::exception* e) {
-			std::cerr << e->what() << std::endl;
-			delete e;
+		std::lock_guard<std::mutex> lock_guard(m_co_mutex);
+		for(auto& l : m_co_listener) {
+			try {
+				breep::logger<peer_manager>.trace("Calling connection listener (id: " + std::to_string(l.first) + ")");
+				l.second(*this, p);
+
+			} catch (const std::exception& e) {
+				breep::logger<peer_manager>.warning("Exception thrown while calling connection listener " + l.first);
+				breep::logger<peer_manager>.warning(e.what());
+			} catch (const std::exception* e) {
+				breep::logger<peer_manager>.warning("Exception thrown while calling connection listener " + l.first);
+				breep::logger<peer_manager>.warning(e->what());
+				delete e;
+			}
 		}
+	} else {
+		breep::logger<peer_manager>.info("Peer " + boost::uuids::to_string(p.id()) + ": local connection_predicate rejected the connection");
+		m_manager.process_connection_denial(p);
 	}
 }
 
 template <typename T>
 inline void breep::basic_peer_manager<T>::peer_connected(peer&& p, unsigned char distance, peer& bridge) {
-
 	boost::uuids::uuid id = p.id();
 	m_peers.emplace(std::make_pair(id, std::move(p)));
 
-	std::pair<boost::uuids::uuid, const peer*> pair_wptr = std::make_pair(id, &bridge);
+	std::pair<boost::uuids::uuid, const peer *> pair_wptr = std::make_pair(id, &bridge);
 	m_me.path_to_passing_by().insert(pair_wptr);
-	m_me.bridging_from_to().insert(std::make_pair(id, std::vector<const peer*>{}));
+	m_me.bridging_from_to().insert(std::make_pair(id, std::vector<const peer *>{}));
 
 	peer& new_peer = m_peers.at(id);
 	new_peer.distance(distance);
@@ -271,14 +322,17 @@ inline void breep::basic_peer_manager<T>::peer_connected(peer&& p, unsigned char
 	breep::logger<peer_manager>.info("Peer " + boost::uuids::to_string(id) + " connected");
 
 	std::lock_guard<std::mutex> lock_guard(m_co_mutex);
-	for(auto& l : m_co_listener) {
+	for (auto& l : m_co_listener) {
 		try {
 			breep::logger<peer_manager>.trace("Calling connection listener (id: " + std::to_string(l.first) + ")");
 			l.second(*this, p);
+
 		} catch (const std::exception& e) {
-			std::cerr << e.what() << std::endl;
-		} catch (const std::exception* e) {
-			std::cerr << e->what() << std::endl;
+			breep::logger<peer_manager>.warning("Exception thrown while calling connection listener " + l.first);
+			breep::logger<peer_manager>.warning(e.what());
+		} catch (const std::exception * e) {
+			breep::logger<peer_manager>.warning("Exception thrown while calling connection listener " + l.first);
+			breep::logger<peer_manager>.warning(e->what());
 			delete e;
 		}
 	}
@@ -297,10 +351,13 @@ inline void breep::basic_peer_manager<T>::peer_disconnected(peer& p) {
 		try {
 			breep::logger<peer_manager>.trace("Calling disconnection listener (id: " + std::to_string(l.first) + ")");
 			l.second(*this, p);
+
 		} catch (const std::exception& e) {
-			std::cerr << e.what() << std::endl;
+			breep::logger<peer_manager>.warning("Exception thrown while calling disconnection listener " + l.first);
+			breep::logger<peer_manager>.warning(e.what());
 		} catch (const std::exception* e) {
-			std::cerr << e->what() << std::endl;
+			breep::logger<peer_manager>.warning("Exception thrown while calling disconnection listener " + l.first);
+			breep::logger<peer_manager>.warning(e->what());
 			delete e;
 		}
 	}
@@ -354,6 +411,12 @@ void breep::basic_peer_manager<T>::send_to_handler(const peer& /*source*/, const
 	std::copy(processed_data.data() + 1, processed_data.data() + 1 + id_size, sender_id.data);
 	std::copy(processed_data.data() + 1 + id_size, processed_data.data() + 1 + 2 * id_size, target_id.data);
 
+	if (!m_peers.count(sender_id)) {
+		breep::logger<peer_manager>.error("Received data from peer " + boost::uuids::to_string(sender_id)
+				+ " which is disconnected.");
+		return;
+	}
+
 	if (m_me.id() == target_id) {
 
 		const peer& sender(m_peers.at(sender_id));
@@ -364,10 +427,13 @@ void breep::basic_peer_manager<T>::send_to_handler(const peer& /*source*/, const
 			try {
 				breep::logger<peer_manager>.trace("Calling data listener (id: " + std::to_string(l.first) + ")");
 				l.second(*this, sender, processed_data.data() + 1 + 2 * id_size, processed_data.size() - 1 - 2 * id_size, false);
-			}  catch (const std::exception& e) {
-				std::cerr << e.what() << '\n';
+
+			} catch (const std::exception& e) {
+				breep::logger<peer_manager>.warning("Exception thrown while calling data listener " + l.first);
+				breep::logger<peer_manager>.warning(e.what());
 			} catch (const std::exception* e) {
-				std::cerr << e->what() << '\n';
+				breep::logger<peer_manager>.warning("Exception thrown while calling data listener " + l.first);
+				breep::logger<peer_manager>.warning(e->what());
 				delete e;
 			}
 		}
@@ -394,10 +460,13 @@ void breep::basic_peer_manager<T>::send_to_all_handler(const peer& source, const
 		try {
 			breep::logger<peer_manager>.trace("Calling data listener (id: " + std::to_string(l.first) + ")");
 			l.second(*this, source, processed_data.data(), processed_data.size(), true);
+
 		} catch (const std::exception& e) {
-			std::cerr << e.what() << '\n';
+			breep::logger<peer_manager>.warning("Exception thrown while calling data listener " + l.first);
+			breep::logger<peer_manager>.warning(e.what());
 		} catch (const std::exception* e) {
-			std::cerr << e->what() << '\n';
+			breep::logger<peer_manager>.warning("Exception thrown while calling data listener " + l.first);
+			breep::logger<peer_manager>.warning(e->what());
 			delete e;
 		}
 	}
@@ -518,7 +587,9 @@ void breep::basic_peer_manager<T>::connect_to_handler(const peer& source, const 
 
 	if (p && p->id() == id) {
 		breep::logger<peer_manager>.trace("Connection successful");
+        m_ignore_predicate = true;
 		peer_connected(std::move(p.get()));
+        m_ignore_predicate = true;
 	} else {
 		breep::logger<peer_manager>.trace("Connection failed. Requesting a forwarding.");
 		m_manager.send(commands::forward_to, ldata, source);
@@ -703,9 +774,11 @@ void breep::basic_peer_manager<T>::peers_list_handler(const peer& /*source*/, co
 		}
 	}
 
+    m_ignore_predicate = true;
 	for (auto& peer_ptr : peers_list) {
 		peer_connected(std::move(peer_ptr));
 	}
+    m_ignore_predicate = false;
 
 	std::vector<uint8_t> sendable_uuid;
 	for (std::unique_ptr<peer>& peer_ptr : m_failed_connections) {

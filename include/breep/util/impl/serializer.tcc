@@ -1,6 +1,6 @@
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 //                                                                                               //
-// Copyright 2017 Lucas Lazare.                                                                  //
+// Copyright 2017-2018 Lucas Lazare.                                                             //
 // This file is part of Breep project which is released under the                                //
 // European Union Public License v1.1. If a copy of the EUPL was                                 //
 // not distributed with this software, you can obtain one at :                                   //
@@ -30,7 +30,7 @@
 namespace breep { namespace detail {
 	// The code from the following method was adapted from the public domain
 	template <typename ReturnType, typename FloatType, unsigned int ExponentBits, unsigned int MantissaBits>
-	ReturnType toIEEE(FloatType value) {
+	constexpr ReturnType toIEEE(FloatType value) {
 
 		switch (std::fpclassify(value)) {
 			case FP_INFINITE: {
@@ -128,11 +128,13 @@ namespace detail { // breep::detail
 	inline serializer& left_shift_op_impl(serializer&, bool);
 	inline serializer& left_shift_op_impl(serializer&, char);
 	inline serializer& left_shift_op_impl(serializer&, float);
+	template <typename T> std::enable_if_t<!breep::type_traits<T>::is_enum, serializer&> left_shift_op_impl(serializer&, const T&);
 	serializer& left_shift_op_impl(serializer&, const std::vector<bool>&);
-	template <typename T> serializer& left_shift_op_impl(serializer& s, const T&);
 	template <typename T> serializer& left_shift_op_impl(serializer&, const std::forward_list<T>&);
 	template <typename T, typename U> serializer& left_shift_op_impl(serializer&, const std::pair<T,U>&);
 	template <typename... T> serializer& left_shift_op_impl(serializer&, const std::tuple<T...>&);
+	template <typename T> std::enable_if_t<breep::type_traits<T>::is_enum_class, serializer&> left_shift_op_impl(serializer&, T);
+	template <typename T> std::enable_if_t<breep::type_traits<T>::is_enum_plain, serializer&> left_shift_op_impl(serializer&, T&&);
 
 	inline serializer& left_shift_op_impl(serializer& s, uint8_t val) {
 		s.m_os.put(val);
@@ -179,11 +181,11 @@ namespace detail { // breep::detail
 	}
 
 	inline serializer& left_shift_op_impl(serializer& s, char val) {
-		if (std::numeric_limits<char>::min() < 0) {
-			auto unsigned_value = static_cast<unsigned char>(val);
+		if (std::numeric_limits<char>::is_signed) {
+			auto unsigned_value = static_cast<signed char>(val);
 			left_shift_op_impl(s, unsigned_value);
 		} else {
-			auto signed_value = static_cast<signed char>(val);
+			auto signed_value = static_cast<unsigned char>(val);
 			left_shift_op_impl(s, signed_value);
 		}
 		return s;
@@ -199,7 +201,8 @@ namespace detail { // breep::detail
 	}
 
 	template <typename IterableContainer>
-	serializer& left_shift_op_impl(serializer& s, const IterableContainer& val) {
+	std::enable_if_t<!breep::type_traits<IterableContainer>::is_enum, serializer&>
+	left_shift_op_impl(serializer& s, const IterableContainer& val) {
 		static_assert(!std::is_pointer<IterableContainer>::value, "failed to dereference IterableContainer");
 
 		write_size(s, val.size());
@@ -209,7 +212,7 @@ namespace detail { // breep::detail
 		return s;
 	}
 
-    serializer& left_shift_op_impl(serializer& s, const std::vector<bool>& vect) {
+    inline serializer& left_shift_op_impl(serializer& s, const std::vector<bool>& vect) {
         write_size(s, vect.size());
         for (std::vector<bool>::size_type i = 0 ; i < vect.size() ; i += std::numeric_limits<uint8_t>::digits) {
             uint8_t mask = 0;
@@ -245,6 +248,20 @@ namespace detail { // breep::detail
                 });
 		return s;
 	}
+
+	template <typename T>
+	std::enable_if_t<breep::type_traits<T>::is_enum_class, serializer&>
+	left_shift_op_impl(serializer& s, T value) {
+		return s << static_cast<std::underlying_type_t<T>>(value);
+	}
+
+	template <typename T>
+	std::enable_if_t<breep::type_traits<T>::is_enum_plain, serializer&>
+    left_shift_op_impl(serializer& s, T&& value) {
+//    	 std::underlying_type is implementation defined for plain enums
+		return s << static_cast<int64_t>(value);
+    }
+
 
 } // namespace detail
 
